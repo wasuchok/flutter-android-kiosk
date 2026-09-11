@@ -4,6 +4,8 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import '../data/datasources/wifi_datasource.dart';
 import '../data/repositories/wifi_repository_impl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../domain/entities/wifi_network.dart';
 import '../domain/entities/retry_policy.dart';
 import '../domain/entities/wifi_connection_status.dart';
 import '../domain/repositories/wifi_repository.dart';
@@ -54,6 +56,8 @@ class WifiConnectionService extends ChangeNotifier {
   DateTime? _retryStartedAt;
 
   RetryPolicy get retryPolicy => _retryPolicy;
+
+  DateTime? _lastConnectAttempt;
 
   /// Retry pattern:
   /// 3 → 3 → 5 → 5 → 10 → 10 → 30 → 30 → 30...
@@ -143,6 +147,7 @@ class WifiConnectionService extends ChangeNotifier {
       if (hasWifi) {
         _handleConnected();
       } else {
+        await _tryConnectSavedWifi();
         _handleDisconnected();
       }
     } catch (error) {
@@ -152,6 +157,31 @@ class WifiConnectionService extends ChangeNotifier {
     } finally {
       _isChecking = false;
     }
+  }
+
+  Future<void> _tryConnectSavedWifi() async {
+    // Cooldown 20 วินาที เพื่อไม่ให้ขัดจังหวะ handshake ของ Android
+    if (_lastConnectAttempt != null &&
+        DateTime.now().difference(_lastConnectAttempt!) <
+            const Duration(seconds: 20)) {
+      return;
+    }
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedSsid = prefs.getString('wifi_ssid');
+      if (savedSsid != null && savedSsid.isNotEmpty) {
+        _lastConnectAttempt = DateTime.now();
+        debugPrint('[WiFi] Connecting to saved Wi-Fi: $savedSsid');
+        await _repository.connectWifi(
+          WifiNetwork(
+            ssid: savedSsid,
+            username: prefs.getString('wifi_username'),
+            password: prefs.getString('wifi_password'),
+          ),
+        );
+      }
+    } catch (_) {}
   }
 
   // ============================================================
@@ -198,6 +228,7 @@ class WifiConnectionService extends ChangeNotifier {
     _retryIndex = 0;
     _retryAttempt = 0;
     _retryCountdown = 0;
+    _lastConnectAttempt = null;
 
     _updateStatus(WifiConnectionStatus.connected, 'Wi-Fi connected');
 
@@ -313,6 +344,7 @@ class WifiConnectionService extends ChangeNotifier {
     _retryIndex = 0;
     _retryAttempt = 0;
     _retryCountdown = 0;
+    _lastConnectAttempt = null;
 
     _updateStatus(
       WifiConnectionStatus.checking,
@@ -322,11 +354,14 @@ class WifiConnectionService extends ChangeNotifier {
     await checkNow();
   }
 
+  bool _disposed = false;
+
   // ============================================================
   // UPDATE UI STATUS
   // ============================================================
 
   void _updateStatus(WifiConnectionStatus status, String text) {
+    if (_disposed) return;
     _status = status;
     _statusText = text;
 
@@ -362,6 +397,7 @@ class WifiConnectionService extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     stop();
     super.dispose();
   }

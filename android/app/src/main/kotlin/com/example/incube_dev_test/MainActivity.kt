@@ -7,7 +7,16 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
+import android.net.wifi.WifiConfiguration
+import android.net.wifi.WifiEnterpriseConfig
 import android.net.wifi.WifiManager
+import android.net.wifi.WifiNetworkSuggestion
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.net.wifi.WifiNetworkSpecifier
+import android.provider.Settings
 import android.os.Build
 import androidx.annotation.NonNull
 import io.flutter.embedding.android.FlutterActivity
@@ -136,6 +145,47 @@ class MainActivity : FlutterActivity() {
                             applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
 
                     when (call.method) {
+                        "openWifiSettings" -> {
+                            try {
+                                val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                    Intent(Settings.Panel.ACTION_WIFI)
+                                } else {
+                                    Intent(Settings.ACTION_WIFI_SETTINGS)
+                                }
+                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                startActivity(intent)
+                                result.success(true)
+                            } catch (e: Exception) {
+                                try {
+                                    val fallbackIntent = Intent(Settings.ACTION_WIFI_SETTINGS)
+                                    fallbackIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    startActivity(fallbackIntent)
+                                    result.success(true)
+                                } catch (e2: Exception) {
+                                    result.error("ERROR", "Failed to open Wi-Fi settings: ${e2.message}", null)
+                                }
+                            }
+                        }
+                        "connectWifi" -> {
+                            val ssid = call.argument<String>("ssid") ?: ""
+                            val password = call.argument<String>("password") ?: ""
+                            val username = call.argument<String>("username") ?: ""
+
+                            try {
+                                val success = connectToWifi(wifiManager, ssid, password, username)
+                                result.success(success)
+                            } catch (e: Exception) {
+                                result.error("WIFI_CONNECT_ERROR", e.message, null)
+                            }
+                        }
+                        "disconnectWifi" -> {
+                            try {
+                                disconnectWifi(wifiManager)
+                                result.success(true)
+                            } catch (e: Exception) {
+                                result.error("ERROR", "Failed to disconnect Wi-Fi: ${e.message}", null)
+                            }
+                        }
                         "setWifiEnabled" -> {
                             val enable = call.argument<Boolean>("enable") ?: false
                             try {
@@ -228,5 +278,216 @@ class MainActivity : FlutterActivity() {
         }
 
         @Suppress("DEPRECATION") return Build.SERIAL ?: "UNKNOWN"
+    }
+
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    private fun connectToWifi(
+            wifiManager: WifiManager,
+            ssid: String,
+            pass: String,
+            username: String = ""
+    ): Boolean {
+        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        val isDeviceOwner = dpm.isDeviceOwnerApp(packageName)
+
+        @Suppress("DEPRECATION")
+        if (!wifiManager.isWifiEnabled) {
+            try {
+                wifiManager.isWifiEnabled = true
+            } catch (_: Exception) {}
+        }
+
+        if (isDeviceOwner || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            @Suppress("DEPRECATION")
+            val wifiConfig =
+                    WifiConfiguration().apply {
+                        this.SSID = "\"$ssid\""
+                        if (username.isNotEmpty()) {
+                            this.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_EAP)
+                            this.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.IEEE8021X)
+                            this.enterpriseConfig =
+                                    WifiEnterpriseConfig().apply {
+                                        identity = username
+                                        password = pass
+                                        eapMethod = WifiEnterpriseConfig.Eap.PEAP
+                                        phase2Method = WifiEnterpriseConfig.Phase2.MSCHAPV2
+                                    }
+                        } else if (pass.isNotEmpty()) {
+                            this.preSharedKey = "\"$pass\""
+                        } else {
+                            this.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE)
+                        }
+                    }
+
+            @Suppress("DEPRECATION")
+            var netId = wifiManager.addNetwork(wifiConfig)
+            if (netId == -1) {
+                @Suppress("DEPRECATION")
+                val existing =
+                        wifiManager.configuredNetworks?.firstOrNull { it.SSID == "\"$ssid\"" }
+                if (existing != null) {
+                    wifiConfig.networkId = existing.networkId
+                    @Suppress("DEPRECATION")
+                    netId = wifiManager.updateNetwork(wifiConfig)
+                    if (netId == -1) {
+                        netId = existing.networkId
+                    }
+                }
+            }
+
+            if (netId != -1) {
+                @Suppress("DEPRECATION")
+                wifiManager.disconnect()
+                @Suppress("DEPRECATION")
+                val enabled = wifiManager.enableNetwork(netId, true)
+                @Suppress("DEPRECATION")
+                wifiManager.reconnect()
+
+                if (enabled) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        registerSuggestion(wifiManager, ssid, pass, username, isDeviceOwner)
+                    }
+                    return true
+                }
+            }
+        }
+
+        @Suppress("DEPRECATION")
+        val info = wifiManager.connectionInfo
+        if (info != null && info.ssid == "\"$ssid\"" && info.networkId != -1) {
+            return true
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            registerSuggestion(wifiManager, ssid, pass, username, isDeviceOwner)
+            if (!isDeviceOwner) {
+                connectWithSpecifier(ssid, pass, username)
+            }
+            return true
+        }
+
+        return false
+    }
+
+    private fun registerSuggestion(
+            wifiManager: WifiManager,
+            ssid: String,
+            pass: String,
+            username: String,
+            isDeviceOwner: Boolean
+    ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val suggestionBuilder =
+                    WifiNetworkSuggestion.Builder()
+                            .setSsid(ssid)
+                            .setIsAppInteractionRequired(!isDeviceOwner)
+
+            if (username.isNotEmpty()) {
+                val enterpriseConfig =
+                        WifiEnterpriseConfig().apply {
+                            identity = username
+                            password = pass
+                            eapMethod = WifiEnterpriseConfig.Eap.PEAP
+                            phase2Method = WifiEnterpriseConfig.Phase2.MSCHAPV2
+                        }
+                suggestionBuilder.setWpa2EnterpriseConfig(enterpriseConfig)
+            } else if (pass.isNotEmpty()) {
+                suggestionBuilder.setWpa2Passphrase(pass)
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    val currentSuggestions = wifiManager.networkSuggestions
+                    if (currentSuggestions.isNotEmpty()) {
+                        wifiManager.removeNetworkSuggestions(currentSuggestions)
+                    }
+                } catch (_: Exception) {}
+            }
+
+            val suggestions = listOf(suggestionBuilder.build())
+            wifiManager.addNetworkSuggestions(suggestions)
+        }
+    }
+
+    private fun connectWithSpecifier(ssid: String, pass: String, username: String = "") {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            networkCallback?.let {
+                try {
+                    cm.unregisterNetworkCallback(it)
+                } catch (_: Exception) {}
+            }
+
+            val specifierBuilder = WifiNetworkSpecifier.Builder().setSsid(ssid)
+            if (username.isNotEmpty()) {
+                val enterpriseConfig =
+                        WifiEnterpriseConfig().apply {
+                            identity = username
+                            password = pass
+                            eapMethod = WifiEnterpriseConfig.Eap.PEAP
+                            phase2Method = WifiEnterpriseConfig.Phase2.MSCHAPV2
+                        }
+                specifierBuilder.setWpa2EnterpriseConfig(enterpriseConfig)
+            } else if (pass.isNotEmpty()) {
+                specifierBuilder.setWpa2Passphrase(pass)
+            }
+
+            val request =
+                    NetworkRequest.Builder()
+                            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                            .setNetworkSpecifier(specifierBuilder.build())
+                            .build()
+
+            val callback =
+                    object : ConnectivityManager.NetworkCallback() {
+                        override fun onAvailable(network: Network) {
+                            super.onAvailable(network)
+                            cm.bindProcessToNetwork(network)
+                        }
+
+                        override fun onLost(network: Network) {
+                            super.onLost(network)
+                            try {
+                                cm.bindProcessToNetwork(null)
+                            } catch (_: Exception) {}
+                        }
+
+                        override fun onUnavailable() {
+                            super.onUnavailable()
+                            try {
+                                cm.bindProcessToNetwork(null)
+                            } catch (_: Exception) {}
+                        }
+                    }
+            networkCallback = callback
+            cm.requestNetwork(request, callback)
+        }
+    }
+
+    private fun disconnectWifi(wifiManager: WifiManager) {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        networkCallback?.let {
+            try {
+                cm.unregisterNetworkCallback(it)
+            } catch (_: Exception) {}
+            networkCallback = null
+        }
+        try {
+            cm.bindProcessToNetwork(null)
+        } catch (_: Exception) {}
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val suggestions = wifiManager.networkSuggestions
+                if (suggestions.isNotEmpty()) {
+                    wifiManager.removeNetworkSuggestions(suggestions)
+                }
+            } catch (_: Exception) {}
+        }
+        @Suppress("DEPRECATION")
+        try {
+            wifiManager.disconnect()
+        } catch (_: Exception) {}
     }
 }

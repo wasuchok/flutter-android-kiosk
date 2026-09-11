@@ -1,3 +1,4 @@
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:get_it/get_it.dart';
 
@@ -16,6 +17,7 @@ import '../../features/wifi_connectivity/data/repositories/wifi_repository_impl.
 import '../../features/wifi_connectivity/domain/repositories/wifi_repository.dart';
 import '../../features/wifi_connectivity/domain/usecases/check_wifi_connection_usecase.dart';
 import '../../features/wifi_connectivity/domain/usecases/listen_wifi_connection_usecase.dart';
+import '../../features/wifi_connectivity/domain/usecases/connect_wifi_usecase.dart';
 import '../../features/wifi_connectivity/domain/usecases/set_wifi_enabled_usecase.dart';
 import '../../features/wifi_connectivity/services/wifi_connection_service.dart';
 
@@ -23,6 +25,10 @@ final sl = GetIt.instance;
 
 Future<void> initLocator() async {
   // External / 3rd Party
+  if (!sl.isRegistered<SharedPreferences>()) {
+    final prefs = await SharedPreferences.getInstance();
+    sl.registerLazySingleton<SharedPreferences>(() => prefs);
+  }
   if (!sl.isRegistered<Connectivity>()) {
     sl.registerLazySingleton(() => Connectivity());
   }
@@ -101,6 +107,9 @@ Future<void> initLocator() async {
   }
   if (!sl.isRegistered<SetWifiEnabledUseCase>()) {
     sl.registerLazySingleton(() => SetWifiEnabledUseCase(sl()));
+  }
+  if (!sl.isRegistered<ConnectWifiUseCase>()) {
+    sl.registerLazySingleton(() => ConnectWifiUseCase(sl()));
   }
 
   // Presentation Services / Controllers

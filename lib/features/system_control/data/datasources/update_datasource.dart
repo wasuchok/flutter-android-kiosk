@@ -27,19 +27,21 @@ class UpdateRemoteDataSourceImpl implements UpdateDataSource {
 
       final data = jsonDecode(response.body);
 
-      final int latestVersionCode = int.parse(data['versionCode'].toString());
-      final String latestVersionName = data['versionName'].toString();
-      final String downloadUrl = data['downloadUrl'];
+      final int latestVersionCode =
+          int.tryParse(data['versionCode']?.toString() ?? '') ?? 0;
+      final String latestVersionName =
+          data['versionName']?.toString() ?? '';
+      final String downloadUrl = data['downloadUrl']?.toString() ?? '';
 
       final packageInfo = await PackageInfo.fromPlatform();
-      final int currentVersionCode = int.parse(packageInfo.buildNumber);
+      final int currentVersionCode =
+          int.tryParse(packageInfo.buildNumber) ?? 0;
       final String currentVersionName = packageInfo.version;
 
       debugPrint('Current App: $currentVersionName ($currentVersionCode)');
       debugPrint('Latest Server: $latestVersionName ($latestVersionCode)');
 
-      if (latestVersionCode > currentVersionCode &&
-          latestVersionName != currentVersionName) {
+      if (latestVersionCode > currentVersionCode && downloadUrl.isNotEmpty) {
         debugPrint('New version detected! Starting download...');
         final apkPath = await _downloadApk(downloadUrl);
         if (apkPath != null) {
@@ -48,6 +50,8 @@ class UpdateRemoteDataSourceImpl implements UpdateDataSource {
       } else {
         debugPrint('App is up to date.');
       }
+    } on SocketException {
+      debugPrint('[Update] Cannot check for update: Device is offline');
     } catch (e) {
       debugPrint('Error Download and Install: $e');
     }
